@@ -2,8 +2,9 @@
 
 #include <vector>
 
+// change it for gpu RGBA, cpu it was using RGB, this will break cpu
 FrameBuffer::FrameBuffer(int width, int height)
-    : width_(width), height_(height), pixels_(width * height * 3, 0) {}
+    : width_(width), height_(height), pixels_(width * height * 4, 0) {}
 
 FrameBuffer::~FrameBuffer() {}
 
