@@ -16,6 +16,12 @@ struct ScratchBuffers {
     void* d_viewmat = nullptr;
     void* d_proj_xy = nullptr;
     void* d_depths = nullptr;
+    void* d_tiles_touched = nullptr;
+    void* d_radii = nullptr;
+    void* d_conic_opacities = nullptr;
+    void* d_point_offsets = nullptr;
+    void* d_cub_temp = nullptr;  // temporary buffer for cub::DeviceScan
+    size_t d_cub_temp_bytes = 0;
     void* d_framebuf = nullptr;
     int width, height;
 };

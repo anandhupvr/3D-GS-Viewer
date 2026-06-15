@@ -52,7 +52,8 @@ Eigen::Matrix2f splat::project_covarience(const Eigen::Matrix3f& cov3d_world,
 }
 
 // axis-aligned bouding box in screen space (x_min, y_min, x_max, y_max)
-// so for rasterization no eigen decomposition is needed(check again)
+// using simplest method, circle approximation would more accurate(using eigen values)
+// if the gaussian is rotated bbox misses the corners
 // halft width = sqrt(cov2d(0, 0) * 3), halft height = sqrt(cov2d(1, 1) * 3)
 Eigen::Vector4i splat::compute_bounding_box(const Eigen::Matrix2f& cov2d,
                                             const Eigen::Vector2f& center_pixels,

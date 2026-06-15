@@ -3,6 +3,7 @@
 #include "glm/matrix.hpp"
 #include <cuda.h>  // inly because of glm, fix?
 #include <cuda_runtime.h>
+#include <vector_types.h>
 
 #include <glm/glm.hpp>
 
@@ -74,17 +75,12 @@ __device__ inline float3 compute_cov3d_inv(const float* __restrict__ cov3d,
 
     glm::mat3 cov2d_mat = glm::transpose(J) * sigma_cam * J;
 
-    // calculate inv
-
-    // regularization(prevents singular mat on inversion)
-    float a = cov2d_mat[0][0] * 0.3f;
-    float b = cov2d_mat[0][1];
-    float c = cov2d_mat[1][1] + 0.3f;
-
-    // invert 2x2 : [[a,b], [b, c]]^-1 = 1/ (ac - b^2) * [[c, -b], [-b, a]]
-    float det = a * c - b * b;
-    float inv_det = 1.0f / (det + 1e-7f);
-    // return conic as float3 {a', b', c'} = upper triangle of inverse
-    return make_float3(c * inv_det, -b * inv_det, a * inv_det);
+    /*
+    [a, b, 0]
+    [b, c, 0]
+    [0, 0, 0]
+    */
+    // return a, b, c (symmetric matrix)
+    return {float(cov2d_mat[0][0]), float(cov2d_mat[1][0]), float(cov2d_mat[1][1])};
 }
 }  // namespace gmath
