@@ -24,6 +24,13 @@ struct ScratchBuffers {
     size_t d_cub_temp_bytes = 0;
     void* d_framebuf = nullptr;
     int width, height;
+
+    // bining
+    void* d_keys_unsorted = nullptr;
+    void* d_vals_unsorted = nullptr;
+    void* d_keys_sorted = nullptr;
+    void* d_point_list = nullptr;  // guassian ID after sort
+    int L_max = 0;
 };
 
 void upload(SceneBuffers& scene,
