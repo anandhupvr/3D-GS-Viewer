@@ -1,12 +1,15 @@
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 
-#include <cccl/cub/device/device_scan.cuh>
 #include <cub/cub.cuh>
+#include <cub/device/device_radix_sort.cuh>
 #include <cuda.h>
 #include <cuda_device_runtime_api.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <driver_types.h>
+#include <vector_functions.h>
 
 // #include <glm/glm.hpp>
 
@@ -15,6 +18,48 @@
 #include "renderer/kernels/gaussian_pipeline.cuh"
 
 namespace rasterizer {
+
+__global__ void duplicate_and_generate_keys(int N,
+                                            const float* __restrict__ d_proj_xy,
+                                            const float* __restrict__ d_radii,
+                                            const float* __restrict__ d_depths,
+                                            const int* __restrict__ d_tiles_touched,
+                                            const int* __restrict__ d_point_offsets,
+                                            uint64_t* d_keys_unsorted,
+                                            uint32_t* d_vals_unsorted,
+                                            dim3 tile_grid) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N)
+        return;
+    if (d_radii[idx] > 0)
+        return;
+
+    uint32_t off = (idx == 0) ? 0 : d_point_offsets[idx - 1];
+    float2 point = make_float2(d_proj_xy[2 * idx], d_proj_xy[2 * idx + 1]);
+    float radius = d_radii[idx];
+
+    // calculate tile range
+    int x_min = (int)floorf((point.x - radius) / tile_grid.x);
+    int x_max = (int)ceilf((point.x + radius) / tile_grid.x);
+    int y_min = (int)floorf((point.y - radius) / tile_grid.y);
+    int y_max = (int)ceilf((point.y + radius) / tile_grid.y);
+    float depth = d_depths[idx];
+    // generate keys and values for each touched tile
+    for (int y = y_min; y < y_max; y++) {
+        for (int x = x_min; x < x_max; x++) {
+            if (y < 0 || x < 0)
+                printf("error: negative tile index %d, %d\n", x, y);
+            //     continue;  later check if this is possible
+
+            uint64_t key = y * tile_grid.x + x;
+            key <<= 32;
+            key |= (uint32_t)depth;  // gaussian id
+            d_keys_unsorted[off] = key;
+            d_vals_unsorted[off] = idx;
+            off++;
+        }
+    }
+}
 
 __global__ void project_gaussians(int N,
                                   const float* __restrict__ d_means,
@@ -79,7 +124,7 @@ __global__ void project_gaussians(int N,
     float lambda2 = mid - disc;  // smaller eigenvalue
     float radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
 
-    // helper for sorting tile_touched
+    // assumming tile size 16x16
     int tW = (int)ceilf((float)W / 16);
     int tH = (int)ceilf((float)H / 16);
 
@@ -173,9 +218,10 @@ void forward(const SceneBuffers& scene,
     int* d_in = static_cast<int*>(scratch.d_tiles_touched);
     int* d_out = static_cast<int*>(scratch.d_point_offsets);
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        &scratch.d_cub_temp, scratch.d_cub_temp_bytes, d_in, d_out, scene.N));
+        scratch.d_cub_temp, scratch.d_cub_temp_bytes, d_in, d_out, scene.N));
 
-    // sorting
+    // will be used for rendering kernel
+    dim3 tile_grid((scratch.width + 15) / 16, (scratch.height + 15) / 16, 1);
 
     int L = 0;
     cudaMemcpy(&L,
@@ -183,11 +229,47 @@ void forward(const SceneBuffers& scene,
                sizeof(int),
                cudaMemcpyDeviceToHost);
     printf("total points to rasterize: %d : gaussian count : %d\n ", L, scene.N);
+
+    CUDA_CHECK(cudaMalloc(&scratch.d_keys_unsorted, L * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&scratch.d_vals_unsorted, L * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&scratch.d_keys_sorted, L * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&scratch.d_point_list, L * sizeof(uint32_t)));
+
+    // keygeneration (unsorted)
+    // eg : keys[t1|3.1, t2|2.0, t3|4.2....]
+    // values [G0, G0, G1, G2, G2 ....]
+    // using same kernel lauch parameters as projection
+    duplicate_and_generate_keys<<<grid, block>>>(scene.N,
+                                                 static_cast<const float*>(scratch.d_proj_xy),
+                                                 static_cast<const float*>(scratch.d_radii),
+                                                 static_cast<const float*>(scratch.d_depths),
+                                                 static_cast<const int*>(scratch.d_tiles_touched),
+                                                 static_cast<const int*>(scratch.d_point_offsets),
+                                                 static_cast<uint64_t*>(scratch.d_keys_unsorted),
+                                                 static_cast<uint32_t*>(scratch.d_vals_unsorted),
+                                                 tile_grid);
+
+    // dummy
+    // CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr,
+    //                                            scratch.d_cub_temp_bytes,
+    //                                            (const uint64_t*)nullptr,
+    //                                            (uint64_t*)nullptr,
+    //                                            (const uint32_t*)nullptr,
+    //                                            (uint32_t*)nullptr,
+    //                                            scene.N * 16));
+
+    // actual sorting
+
     cudaMemcpy(frame_buf,
                scratch.d_framebuf,
                (size_t)scratch.width * scratch.height * 4,
                cudaMemcpyDeviceToHost);
-    CUDA_CHECK(cudaFree(scratch.d_cub_temp));
+    // cudaFree(scratch.d_cub_temp); // check this again
+
+    cudaFree(scratch.d_keys_unsorted);
+    cudaFree(scratch.d_vals_unsorted);
+    cudaFree(scratch.d_keys_sorted);
+    cudaFree(scratch.d_point_list);
 }
 
 void alloc_scratch(ScratchBuffers& scratch, int N, int W, int H) {
@@ -203,10 +285,21 @@ void alloc_scratch(ScratchBuffers& scratch, int N, int W, int H) {
     CUDA_CHECK(cudaMalloc(&scratch.d_conic_opacities, N * sizeof(float4)));
 
     size_t temp_bytes = 0;
-    CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        nullptr, temp_bytes, (int*)nullptr, (int*)nullptr, N));
+    CUDA_CHECK(cub::DeviceScan::InclusiveSum(nullptr, temp_bytes, (int*)nullptr, (int*)nullptr, N));
     CUDA_CHECK(cudaMalloc(&scratch.d_cub_temp, temp_bytes));
     scratch.d_cub_temp_bytes = temp_bytes;
+
+    // bining
+    // worst case 16 tiles per gaussain
+    // const int K = 16;
+    // const int max_L = N * K;
+    // scratch.L_max = max_L;
+    // CUDA_CHECK(cudaMalloc(&scratch.d_keys_unsorted, max_L * sizeof(uint64_t)));
+    // CUDA_CHECK(cudaMalloc(&scratch.d_vals_unsorted, max_L * sizeof(uint32_t)));
+    // CUDA_CHECK(cudaMalloc(&scratch.d_keys_sorted, max_L * sizeof(uint64_t)));
+    // CUDA_CHECK(cudaMalloc(&scratch.d_point_list, max_L * sizeof(uint32_t)));
+
+    // CUB radix sort - measure with dummpy data
 
     CUDA_CHECK(cudaMalloc(&scratch.d_framebuf, (size_t)W * H * sizeof(uchar4)));
 }
