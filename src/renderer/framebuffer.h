@@ -11,6 +11,10 @@ class FrameBuffer {
     std::vector<int> get_pixel(int x, int y);
     const uint8_t* data() const;
 
+    uint8_t* mutable_data() {
+        return pixels_.data();
+    }
+
     const int width() const {
         return width_;
     }
